@@ -1,1 +1,1 @@
-This will help you Indian ahh mmaster the american accent. AI will listen and respond to your conversation in real time, interrupt whenever you pronounce something wrong and make you repeadetly go ver words that are difficult to pronounce to the avg Indian speaking user.
+This will help your Indian ahh master the american accent. AI will listen and respond to your conversation in real time, interrupt whenever you pronounce something wrong and make you repeadetly go ver words that are difficult to pronounce to the avg Indian speaking user.
