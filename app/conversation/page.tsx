@@ -124,6 +124,28 @@ function browserSpeak(text: string): Promise<void> {
   });
 }
 
+// ── ELEVENLABS TTS → browser fallback ───────────────────────────────
+async function speakText(text: string, voiceIndex = 0): Promise<void> {
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voiceIndex }),
+    });
+    if (!res.ok) { await browserSpeak(text); return; }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) { await browserSpeak(text); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    await new Promise<void>((resolve) => {
+      const audio = new Audio(url);
+      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.play().catch(async () => { await browserSpeak(text); resolve(); });
+    });
+  } catch { await browserSpeak(text); }
+}
+
 // ── SPEECH RECOGNITION ───────────────────────────────────────────────
 type SpeechRecognitionInstance = {
   lang: string;
@@ -208,7 +230,7 @@ function ConversationPage() {
       customer_call: "Thank you for calling, this is Alex. How can I help you today?",
     })[scenario];
     setCurrentAiText(opening);
-    await browserSpeak(opening);
+    await speakText(opening, 0);
     setMessages([{ role: "assistant", content: opening }]);
     setCurrentAiText("");
     await new Promise(r => setTimeout(r, 700));
@@ -350,7 +372,7 @@ function ConversationPage() {
 
       setPhase("ai_speaking");
       setCurrentAiText(chatData.content);
-      await browserSpeak(chatData.content);
+      await speakText(chatData.content, 0);
       setMessages((prev) => [...prev, { role: "assistant", content: chatData.content }]);
       setCurrentAiText("");
       await new Promise(r => setTimeout(r, 700));
