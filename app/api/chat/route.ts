@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-// Groq is used for conversation (free tier)
-// Anthropic is used for correction tips if key is available
 import Anthropic from "@anthropic-ai/sdk";
 
 const anthropic = process.env.ANTHROPIC_API_KEY
@@ -41,108 +39,263 @@ export interface WordScore {
   errorType: string;
 }
 
+// ── CLIP LIBRARY ──────────────────────────────────────────────────────
+// Each clip targets specific Indian English → American English problem sounds
+// errorTypes map to the categories in scoreWord()
+
+export interface ClipChallenge {
+  id: string;
+  line: string;
+  character: string;
+  show: string;
+  searchQuery: string;     // used to fetch a live YouTube ID at runtime
+  youtubeId?: string;      // filled in at runtime by resolveYoutubeId()
+  startTime: number;
+  endTime: number;
+  targetSounds: string[];
+  hint: string;
+}
+
+// Fetch a live YouTube video ID for a search query using the YouTube Data API v3
+async function resolveYoutubeId(searchQuery: string): Promise<string | null> {
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(searchQuery)}&type=video&key=${process.env.YOUTUBE_API_KEY}&maxResults=1`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.items?.[0]?.id?.videoId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const CLIP_LIBRARY: ClipChallenge[] = [
+  // TH sounds
+  {
+    id: "friends-there",
+    line: "I'll be there for you",
+    character: "Theme Song",
+    show: "Friends",
+    searchQuery: "Friends I'll be there for you theme song official Rembrandts",
+    startTime: 0,
+    endTime: 8,
+    targetSounds: ["TH"],
+    hint: "Focus on 'there' — tongue tip between teeth, not D",
+  },
+  {
+    id: "office-that",
+    line: "That's what she said",
+    character: "Michael Scott",
+    show: "The Office",
+    searchQuery: "The Office that's what she said Michael Scott compilation",
+    startTime: 0,
+    endTime: 4,
+    targetSounds: ["TH"],
+    hint: "Hit that TH in 'that' — tongue out between teeth",
+  },
+  {
+    id: "breakingbad-this",
+    line: "I am the one who knocks",
+    character: "Walter White",
+    show: "Breaking Bad",
+    searchQuery: "Breaking Bad I am the one who knocks Walter White scene",
+    startTime: 3,
+    endTime: 15,
+    targetSounds: ["TH"],
+    hint: "Say 'the' with tongue between teeth — not 'da'",
+  },
+  // W/V confusion
+  {
+    id: "got-winter",
+    line: "Winter is coming",
+    character: "Ned Stark",
+    show: "Game of Thrones",
+    searchQuery: "Game of Thrones winter is coming Ned Stark scene",
+    startTime: 0,
+    endTime: 5,
+    targetSounds: ["W"],
+    hint: "Round your lips for W in 'winter' — not V",
+  },
+  {
+    id: "matrix-welcome",
+    line: "Welcome to the real world",
+    character: "Morpheus",
+    show: "The Matrix",
+    searchQuery: "Matrix welcome to the real world Morpheus red pill scene",
+    startTime: 0,
+    endTime: 6,
+    targetSounds: ["W", "TH"],
+    hint: "Two W's and a TH — lips round for W, tongue out for 'the'",
+  },
+  {
+    id: "forrest-wonder",
+    line: "Life is like a box of chocolates",
+    character: "Forrest Gump",
+    show: "Forrest Gump",
+    searchQuery: "Forrest Gump life is like a box of chocolates scene",
+    startTime: 0,
+    endTime: 6,
+    targetSounds: ["W"],
+    hint: "Soft relaxed American vowels — no sharp edges",
+  },
+  // Flap T
+  {
+    id: "friends-better",
+    line: "Could this BE any more of a problem",
+    character: "Chandler Bing",
+    show: "Friends",
+    searchQuery: "Friends Chandler could this BE any more funny compilation",
+    startTime: 0,
+    endTime: 5,
+    targetSounds: ["FLAP_T"],
+    hint: "American T between vowels taps soft like a D — 'butter' not 'but-ter'",
+  },
+  {
+    id: "himym-literally",
+    line: "I literally cannot even right now",
+    character: "Various",
+    show: "How I Met Your Mother",
+    searchQuery: "How I Met Your Mother literally funny moments",
+    startTime: 0,
+    endTime: 5,
+    targetSounds: ["FLAP_T"],
+    hint: "The T in 'literally' flaps — say it fast, 'li-duh-ruh-lee'",
+  },
+  // Stress / schwa reduction
+  {
+    id: "darknight-why",
+    line: "Why so serious",
+    character: "The Joker",
+    show: "The Dark Knight",
+    searchQuery: "Dark Knight why so serious Joker Heath Ledger scene",
+    startTime: 0,
+    endTime: 6,
+    targetSounds: ["STRESS"],
+    hint: "Americans reduce unstressed syllables — 'serious' is 'SIR-ee-us' not 'see-ree-us'",
+  },
+  {
+    id: "inception-idea",
+    line: "What is the most resilient parasite — an idea",
+    character: "Cobb",
+    show: "Inception",
+    searchQuery: "Inception what is the most resilient parasite an idea Cobb",
+    startTime: 0,
+    endTime: 8,
+    targetSounds: ["STRESS", "TH"],
+    hint: "Stress on 're-SIL-ient' — and TH in 'the'",
+  },
+  // Mixed / general American rhythm
+  {
+    id: "wolf-motivate",
+    line: "The only thing standing between you and your goal is the story you keep telling yourself",
+    character: "Jordan Belfort",
+    show: "Wolf of Wall Street",
+    searchQuery: "Wolf of Wall Street motivational speech Jordan Belfort",
+    startTime: 0,
+    endTime: 10,
+    targetSounds: ["TH", "STRESS", "W"],
+    hint: "Three TH sounds, two W's — focus on rhythm and linking words",
+  },
+  {
+    id: "spiderman-power",
+    line: "With great power comes great responsibility",
+    character: "Uncle Ben",
+    show: "Spider-Man",
+    searchQuery: "Spider-Man with great power comes great responsibility Uncle Ben",
+    startTime: 0,
+    endTime: 6,
+    targetSounds: ["W", "STRESS"],
+    hint: "W in 'with' and 'power' — lips rounded, then natural American stress",
+  },
+];
+
+// Map from error pattern → which targetSounds to look for
+const ERROR_TO_SOUND: Record<string, string[]> = {
+  w_confusion: ["W"],
+  th_substitution: ["TH"],
+  flap_t: ["FLAP_T"],
+  stress: ["STRESS"],
+};
+
+// Detect dominant error type from accumulated word scores
+function detectDominantError(allWordScores: WordScore[][]): string | null {
+  const counts: Record<string, number> = { W: 0, TH: 0, FLAP_T: 0, STRESS: 0 };
+  
+  for (const turn of allWordScores) {
+    for (const ws of turn) {
+      if (ws.accuracyScore < 68) {
+        const w = ws.word.toLowerCase();
+        // Rough detection based on word patterns (mirrors scoreWord logic)
+        if (/^w/.test(w) || ["we","were","would","well","with","world","work","water","word","wine","wide","wish"].includes(w)) counts.W++;
+        if (/th/.test(w) || ["the","this","that","they","them","their","there","through","think","three","thank","other","mother","father","weather"].includes(w)) counts.TH++;
+        if (["water","butter","better","little","city","totally","literally","actually","pretty","party"].includes(w)) counts.FLAP_T++;
+        if (["about","again","important","because","together","another","beautiful"].includes(w)) counts.STRESS++;
+      }
+    }
+  }
+
+  const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  if (!dominant || dominant[1] === 0) return null;
+  return dominant[0];
+}
+
+// Pick a clip targeting the dominant error, avoiding repeats
+function pickClip(dominantError: string | null, usedClipIds: string[]): ClipChallenge | null {
+  let candidates = CLIP_LIBRARY.filter(c => !usedClipIds.includes(c.id));
+  
+  if (dominantError) {
+    const targeted = candidates.filter(c => c.targetSounds.includes(dominantError));
+    if (targeted.length > 0) candidates = targeted;
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+// ── SCENARIO PROMPTS (fixed — no more "try saying it" drilling) ───────
 const SCENARIO_PROMPTS: Record<Scenario, string> = {
-  casual: `You are Maya, a friendly American accent coach running a casual conversation practice session with an Indian English speaker learning an American accent.
-Your job is BOTH to have a real conversation AND actively coach their pronunciation.
-After responding to what they said (1 sentence max), if they mispronounced something, call it out directly and naturally — like a friend helping them. 
-Say things like "Oh and hey — you said 'vater', it's actually 'WAH-der', try saying it: water" or "Quick tip — 'the' starts with your tongue between your teeth, not D. Say: the, the, the."
-If pronunciation was good, just continue the conversation naturally.
-Keep total response under 3 sentences. Be warm and encouraging, not robotic.`,
+  casual: `You are Maya, a friendly American friend having a casual conversation with someone practicing their American accent.
 
-  interview: `You are a US hiring manager AND accent coach running a mock interview with an Indian English speaker practicing American pronunciation.
-Ask one interview question per turn. If they mispronounced a word, briefly correct it before asking your next question.
-Example: "Good answer! One thing — you said 'important' with stress on IM, Americans say it as 'im-POR-tant'. Now: tell me about a challenge you overcame."
-Keep it professional but supportive. Max 3 sentences total.`,
+Your ONLY job is to keep the conversation natural and fun. You happen to be good with accents, so if you notice a mispronunciation, you casually mention it in one clause — then immediately move the conversation forward.
 
-  customer_call: `You are a US customer service rep AND accent coach practicing with an Indian English speaker.
-Play out a realistic customer service scenario. If they mispronounce a word, correct it naturally mid-conversation.
-Example: "Got it! By the way — 'water' is WAH-der in American English, not VAH-ter. Let me pull up your account."
-Keep responses to 2-3 sentences max.`,
+Example: "Haha yeah, oh quick thing — it's WAH-der not VAH-ter, American thing — anyway what were you saying about your weekend?"
+
+Rules:
+- Continue the conversation topic FIRST, correction is a quick aside
+- Never pause the conversation to drill a word
+- Never ask them to repeat something
+- If pronunciation was fine, just talk normally
+- Max 2 sentences total
+- Be warm, casual, like texting a friend`,
+
+  interview: `You are a US hiring manager running a mock interview with someone practicing their American accent.
+
+Ask one interview question per turn. If they mispronounced a word, drop a one-clause correction naturally, then ask your next question.
+
+Example: "Good answer — quick note, 'important' is im-POR-dnt in American English — now tell me about a challenge you overcame."
+
+Rules:
+- Never ask them to repeat a word
+- Correction is one clause only, then move on
+- Keep it professional but warm
+- Max 2 sentences total`,
+
+  customer_call: `You are a US customer service rep practicing with someone learning American accent.
+
+Play out a realistic service scenario. If they mispronounce something, correct it in one clause and keep going.
+
+Example: "Got it — by the way, 'water' is WAH-der not VAH-ter — let me pull up your account."
+
+Rules:
+- Never ask them to repeat a word
+- One correction clause max, then continue the scenario
+- Max 2 sentences total`,
 };
 
 const THRESHOLD = 68;
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const {
-      messages,
-      scenario,
-      wordScores,
-      isRetry,
-      retryWord,
-    }: {
-      messages: Message[];
-      scenario: Scenario;
-      wordScores?: WordScore[];
-      isRetry?: boolean;
-      retryWord?: string;
-    } = body;
-
-    // Find words below threshold
-    const problemWords =
-      wordScores?.filter(
-        (w) => w.accuracyScore < THRESHOLD && w.errorType !== "None"
-      ) ?? [];
-
-    const worstWord = problemWords.length > 0 && !isRetry
-      ? problemWords.sort((a, b) => a.accuracyScore - b.accuracyScore)[0]
-      : null;
-
-    const systemPrompt = SCENARIO_PROMPTS[scenario];
-
-    // Mock mode — no Groq key
-    if (!process.env.GROQ_API_KEY) {
-      return NextResponse.json({
-        type: "continue",
-        content: getMockResponse(scenario, messages.length),
-        problemWords,
-        worstWord: worstWord ?? undefined,
-      });
-    }
-
-    // Build messages — inject pronunciation note if there's a problem word
-    const chatMessages = messages.map((m) => ({ role: m.role, content: m.content }));
-    
-    if (worstWord) {
-      const errorInfo = INDIAN_EN_ERRORS[worstWord.word.toLowerCase()];
-      const pronunciationNote = errorInfo
-        ? `[COACH NOTE: The learner just mispronounced "${worstWord.word}". They likely said "${errorInfo.youSay}" instead of "${errorInfo.shouldSay}". ${errorInfo.tip}. Naturally weave a correction into your response — acknowledge what they said, correct the word, have them repeat it, then continue.]`
-        : `[COACH NOTE: The learner mispronounced "${worstWord.word}" (score: ${worstWord.accuracyScore}%). Briefly correct it in your response — tell them what they said wrong and the right way to say it, then continue the conversation.]`;
-      
-      // Append note to last user message
-      if (chatMessages.length > 0) {
-        const last = chatMessages[chatMessages.length - 1];
-        chatMessages[chatMessages.length - 1] = {
-          ...last,
-          content: last.content + " " + pronunciationNote,
-        };
-      }
-    }
-
-    const content = await groqChat(chatMessages, systemPrompt);
-
-    return NextResponse.json({
-      type: "continue",
-      content,
-      problemWords,
-      worstWord: worstWord ?? undefined,
-      retryWordResult: isRetry
-        ? {
-            word: retryWord,
-            passed: problemWords.length === 0,
-          }
-        : undefined,
-    });
-  } catch (err) {
-    console.error("Chat error:", err);
-    return NextResponse.json({ error: "Chat failed" }, { status: 500 });
-  }
-}
-
-// Word-specific Indian English error patterns
+// ── WORD ERROR DATABASE ───────────────────────────────────────────────
 const INDIAN_EN_ERRORS: Record<string, { youSay: string; shouldSay: string; tip: string }> = {
-  // W/V confusion
   "water":   { youSay: "VAH-ter",    shouldSay: "WAH-der",   tip: "Round your lips into a W like you're about to whistle — don't touch your teeth. WAH-der, the T flaps to a soft D." },
   "we":      { youSay: "VEE",        shouldSay: "WEE",       tip: "W needs rounded lips, not teeth on lip. Pucker up like you're saying 'ooh' then slide to 'ee'. WEE." },
   "were":    { youSay: "VER",        shouldSay: "WUR",       tip: "Round lips for W, then the American R — tongue tip back, never touching. WUR-r-r." },
@@ -152,88 +305,32 @@ const INDIAN_EN_ERRORS: Record<string, { youSay: string; shouldSay: string; tip:
   "world":   { youSay: "VORLD",      shouldSay: "WURLD",     tip: "W with rounded lips, then that 'url' sound. WURLD — say 'girl' then swap the G for W." },
   "well":    { youSay: "VEL",        shouldSay: "WEL",       tip: "Lips rounded and pushed out for W. Don't let your top teeth touch your bottom lip. WEL." },
   "with":    { youSay: "VIT",        shouldSay: "WITH",      tip: "Two things: W not V (rounded lips), and end with TH — tongue between teeth. WITH." },
-  // TH sounds
-  "the":     { youSay: "DUH/DUH",    shouldSay: "THUH",      tip: "Stick your tongue tip just between your teeth and blow air. 'The' — that buzzing TH. Don't pull it back to make a D." },
+  "the":     { youSay: "DUH",        shouldSay: "THUH",      tip: "Stick your tongue tip just between your teeth and blow air. 'The' — that buzzing TH. Don't pull it back to make a D." },
   "this":    { youSay: "DIS",        shouldSay: "THIHS",     tip: "Tongue tip between teeth for TH. Feel the air flowing over your tongue. THIHS — not DIS." },
   "that":    { youSay: "DAT",        shouldSay: "THAT",      tip: "Tongue between teeth — TH. THAT. Your tongue tip literally peeks out between your teeth for a split second." },
-  "they":    { youSay: "DAY",        shouldSay: "THAY",      tip: "Start with tongue between teeth — TH. Then 'ay'. THAY. The TH here is voiced (buzzing), like humming while doing the tongue thing." },
-  "them":    { youSay: "DEM",        shouldSay: "THEM",      tip: "Tongue tip between teeth, blow air — TH. THEM not DEM. Practice: 'the them they' — all start with tongue out." },
-  "their":   { youSay: "DAIR",       shouldSay: "THAIR",     tip: "Tongue between teeth for TH, then 'air'. THAIR. Same pronunciation as 'there' and 'they're'." },
-  "there":   { youSay: "DAIR",       shouldSay: "THAIR",     tip: "TH — tongue peeks between teeth. THAIR. The R at the end is silent in most US speech. THEH-r softly." },
-  "through": { youSay: "TROO",       shouldSay: "THROO",     tip: "TH then R — tongue out for TH, then curl back for R. THROO. It's not 'troo', the H matters." },
-  "think":   { youSay: "TINK",       shouldSay: "THINK",     tip: "Tongue between teeth for TH — this one is unvoiced (no buzzing). THINK. Tongue out, air out, then pull back for INK." },
-  "three":   { youSay: "TREE",       shouldSay: "THREE",     tip: "TH before the R — tongue peeks out, then immediately curls back. THREE not TREE. Slow it down: th-r-ee." },
-  "thank":   { youSay: "TANK",       shouldSay: "THANK",     tip: "Tongue between teeth — TH. Unvoiced, just air. THANK not TANK. Your tongue tip touches the edge of your upper teeth." },
-  "other":   { youSay: "UH-DER",     shouldSay: "UH-THER",   tip: "The middle TH — tongue between teeth. UH-THER not UH-DER. Voiced TH like in 'the'." },
-  "mother":  { youSay: "MUH-DER",    shouldSay: "MUH-THER",  tip: "The TH in 'mother' is voiced — tongue between teeth with humming. MUH-THER not MUH-DER." },
-  "father":  { youSay: "FAH-DER",    shouldSay: "FAH-THER",  tip: "Tongue between teeth for the TH. FAH-THER. The R at the end is pronounced with tongue curled back." },
-  "weather": { youSay: "VEH-DER",    shouldSay: "WEH-THER",  tip: "Two issues: W not V at the start, and TH not D in the middle. WEH-THER. Lips round for W, tongue out for TH." },
-  // Flap T (American T → sounds like D between vowels)
-  "better":  { youSay: "BET-ter",    shouldSay: "BEH-der",   tip: "In American English the T between vowels becomes a quick flap — almost a D. BEH-der, not BET-ter. Tongue barely taps the ridge." },
-  "butter":  { youSay: "BUT-ter",    shouldSay: "BUH-der",   tip: "That middle T flaps to a D sound. BUH-der. Rhymes with 'udder'. Tongue tap is very light and fast." },
-  "city":    { youSay: "SIT-ee",     shouldSay: "SIH-dee",   tip: "American T between vowels → D. SIH-dee not SIT-ee. It's a very fast, light tongue tap." },
-  "little":  { youSay: "LIT-tul",    shouldSay: "LIH-dul",   tip: "Both T's flap in American English. LIH-dul — the T barely taps and the final L is light." },
-  "totally": { youSay: "TOH-tal-ee", shouldSay: "TOH-duh-lee", tip: "The T in the middle flaps — TOH-duh-lee. Americans never really enunciate that T hard." },
-  "actually": { youSay: "AK-choo-al-ee", shouldSay: "AK-choo-uh-lee", tip: "Reduce that middle syllable — AK-choo-uh-lee. Americans swallow the 'al' into 'ul'. Fast and relaxed." },
-  "literally": { youSay: "LIT-er-al-ee", shouldSay: "LIH-duh-ruh-lee", tip: "Every T flaps: LIH-duh-ruh-lee. Americans barely pronounce those T's. It almost sounds like 'lidrully'." },
-  // Stress patterns
-  "about":   { youSay: "UH-bout",    shouldSay: "uh-BOUT",   tip: "Stress is on the SECOND syllable — uh-BOUT not AH-bout. The first syllable is reduced to a quick schwa 'uh'." },
-  "again":   { youSay: "UH-gen",     shouldSay: "uh-GEN",    tip: "Stress on GEN — uh-GEN. The first 'a' is a schwa, almost swallowed. uh-GEN." },
-  "important": { youSay: "im-POR-tant", shouldSay: "im-POR-dnt", tip: "The T in the middle flaps — im-POR-dnt. And the last syllable collapses: not 'tant' but 'dnt'." },
+  "they":    { youSay: "DAY",        shouldSay: "THAY",      tip: "Start with tongue between teeth — TH. Then 'ay'. THAY." },
+  "them":    { youSay: "DEM",        shouldSay: "THEM",      tip: "Tongue tip between teeth, blow air — TH. THEM not DEM." },
+  "their":   { youSay: "DAIR",       shouldSay: "THAIR",     tip: "Tongue between teeth for TH, then 'air'. THAIR." },
+  "there":   { youSay: "DAIR",       shouldSay: "THAIR",     tip: "TH — tongue peeks between teeth. THAIR." },
+  "through": { youSay: "TROO",       shouldSay: "THROO",     tip: "TH then R — tongue out for TH, then curl back for R. THROO." },
+  "think":   { youSay: "TINK",       shouldSay: "THINK",     tip: "Tongue between teeth for TH — unvoiced. THINK." },
+  "three":   { youSay: "TREE",       shouldSay: "THREE",     tip: "TH before the R — tongue peeks out, then immediately curls back. THREE not TREE." },
+  "thank":   { youSay: "TANK",       shouldSay: "THANK",     tip: "Tongue between teeth — TH. Unvoiced, just air. THANK not TANK." },
+  "other":   { youSay: "UH-DER",     shouldSay: "UH-THER",   tip: "The middle TH — tongue between teeth. UH-THER not UH-DER." },
+  "mother":  { youSay: "MUH-DER",    shouldSay: "MUH-THER",  tip: "The TH in 'mother' is voiced — tongue between teeth with humming. MUH-THER." },
+  "father":  { youSay: "FAH-DER",    shouldSay: "FAH-THER",  tip: "Tongue between teeth for the TH. FAH-THER." },
+  "weather": { youSay: "VEH-DER",    shouldSay: "WEH-THER",  tip: "Two issues: W not V at the start, and TH not D in the middle. WEH-THER." },
+  "better":  { youSay: "BET-ter",    shouldSay: "BEH-der",   tip: "In American English the T between vowels becomes a quick flap — almost a D. BEH-der." },
+  "butter":  { youSay: "BUT-ter",    shouldSay: "BUH-der",   tip: "That middle T flaps to a D sound. BUH-der." },
+  "city":    { youSay: "SIT-ee",     shouldSay: "SIH-dee",   tip: "American T between vowels → D. SIH-dee not SIT-ee." },
+  "little":  { youSay: "LIT-tul",    shouldSay: "LIH-dul",   tip: "Both T's flap in American English. LIH-dul." },
+  "totally": { youSay: "TOH-tal-ee", shouldSay: "TOH-duh-lee", tip: "The T in the middle flaps — TOH-duh-lee." },
+  "actually": { youSay: "AK-choo-al-ee", shouldSay: "AK-choo-uh-lee", tip: "Reduce that middle syllable — AK-choo-uh-lee." },
+  "literally": { youSay: "LIT-er-al-ee", shouldSay: "LIH-duh-ruh-lee", tip: "Every T flaps: LIH-duh-ruh-lee." },
+  "about":   { youSay: "UH-bout",    shouldSay: "uh-BOUT",   tip: "Stress is on the SECOND syllable — uh-BOUT. The first syllable is a quick schwa." },
+  "again":   { youSay: "UH-gen",     shouldSay: "uh-GEN",    tip: "Stress on GEN — uh-GEN." },
+  "important": { youSay: "im-POR-tant", shouldSay: "im-POR-dnt", tip: "The T flaps — im-POR-dnt. Last syllable collapses." },
 };
-
-async function generateCorrection(
-  word: string,
-  scenario: Scenario
-): Promise<string> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return mockCorrection(word);
-  }
-
-  const errorInfo = INDIAN_EN_ERRORS[word.toLowerCase()];
-  const context = errorInfo
-    ? `The learner likely says "${errorInfo.youSay}" instead of the correct American pronunciation "${errorInfo.shouldSay}".`
-    : `This word is commonly mispronounced by Indian English speakers targeting an American accent.`;
-
-  const correctionSystem = `You are an American accent coach for Indian English speakers. 
-Be specific: tell them exactly what sound they are making wrong (e.g. V instead of W, D instead of TH, hard T instead of flap T) and exactly how to fix it physically (tongue position, lip shape, airflow).
-Format: 1 sentence on what they are doing wrong → 1 sentence on exact mouth/tongue fix → 1 short example.
-Plain text only. Maximum 3 sentences. Be direct, not generic.`;
-
-  const correctionPrompt = `Word: "${word}". ${context} Give a specific correction.`;
-
-  // Try Anthropic first (better quality), fall back to Groq, then mock
-  try {
-    if (anthropic) {
-      const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 150,
-        system: correctionSystem,
-        messages: [{ role: "user", content: correctionPrompt }],
-      });
-      return response.content[0].type === "text" ? response.content[0].text : mockCorrection(word);
-    }
-    if (process.env.GROQ_API_KEY) {
-      return await groqChat([{ role: "user", content: correctionPrompt }], correctionSystem);
-    }
-  } catch (err) {
-    console.error("Correction API failed:", err);
-  }
-  return mockCorrection(word);
-}
-
-function mockCorrection(word: string): string {
-  const w = word.toLowerCase();
-  const info = INDIAN_EN_ERRORS[w];
-  if (info) {
-    return info.tip;
-  }
-  // Generic fallback by pattern
-  if (/^w/.test(w)) return `You may be saying V instead of W at the start. Round your lips like you're about to whistle — don't let your teeth touch your lip. Try: "${word}"`;
-  if (/th/.test(w)) return `The TH sound needs your tongue tip between your teeth. Stick it out slightly and blow air — don't substitute D or T. Try: "${word}"`;
-  if (/t[aeiou]/.test(w) && w.length > 4) return `In American English, T between vowels flaps to a soft D sound. Don't hit that T hard — let it tap lightly. Try: "${word}"`;
-  return `Focus on reduced stress — Americans swallow unstressed syllables. Say "${word}" quickly and casually, don't enunciate every syllable equally.`;
-}
 
 function getMockResponse(scenario: Scenario, turn: number): string {
   const responses: Record<Scenario, string[]> = {
@@ -256,7 +353,129 @@ function getMockResponse(scenario: Scenario, turn: number): string {
       "I've gone ahead and processed that. Is there anything else I can help you with?",
     ],
   };
-
   const list = responses[scenario];
   return list[turn % list.length];
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const {
+      messages,
+      scenario,
+      wordScores,
+      isRetry,
+      retryWord,
+      turnCount,
+      allWordScores, // accumulated word scores from all previous turns
+      usedClipIds,  // clips already shown this session
+    }: {
+      messages: Message[];
+      scenario: Scenario;
+      wordScores?: WordScore[];
+      isRetry?: boolean;
+      retryWord?: string;
+      turnCount?: number;
+      allWordScores?: WordScore[][];
+      usedClipIds?: string[];
+    } = body;
+
+    // Find words below threshold
+    const problemWords =
+      wordScores?.filter((w) => w.accuracyScore < THRESHOLD && w.errorType !== "None") ?? [];
+
+    const worstWord = problemWords.length > 0 && !isRetry
+      ? problemWords.sort((a, b) => a.accuracyScore - b.accuracyScore)[0]
+      : null;
+
+    // ── CLIP CHALLENGE TRIGGER ────────────────────────────────────────
+    // Fire after turn 2 (0-indexed), then every 3 turns after that
+    // Only fire if we have accumulated error data
+    const currentTurn = turnCount ?? 0;
+    const shouldShowClip =
+      !isRetry &&
+      (currentTurn === 2 || (currentTurn > 2 && (currentTurn - 2) % 3 === 0)) &&
+      allWordScores &&
+      allWordScores.length > 0;
+
+    let clipChallenge: ClipChallenge | null = null;
+    let clipIntro = "";
+
+    if (shouldShowClip) {
+      const dominantError = detectDominantError(allWordScores ?? []);
+      clipChallenge = pickClip(dominantError, usedClipIds ?? []);
+
+      if (clipChallenge) {
+        // Resolve a live YouTube ID at runtime so we never get stale/dead embeds
+        const liveId = await resolveYoutubeId(clipChallenge.searchQuery);
+        if (liveId) {
+          clipChallenge = { ...clipChallenge, youtubeId: liveId };
+          const errorLabel: Record<string, string> = {
+            TH: "your TH sounds",
+            W: "your W sounds",
+            FLAP_T: "that American T",
+            STRESS: "word stress",
+          };
+          const focusLabel = dominantError ? errorLabel[dominantError] ?? "your pronunciation" : "your pronunciation";
+          clipIntro = `Hey, I want to try something - I noticed you're working on ${focusLabel}. Here's a line from ${clipChallenge.show}. Try saying it exactly like the character does:`;
+        } else {
+          // YouTube API failed or no results - skip clip this turn
+          clipChallenge = null;
+        }
+      }
+    }
+
+    // Mock mode — no Groq key
+    if (!process.env.GROQ_API_KEY) {
+      return NextResponse.json({
+        type: clipChallenge ? "clip_challenge" : "continue",
+        content: clipChallenge ? clipIntro : getMockResponse(scenario, messages.length),
+        problemWords,
+        worstWord: worstWord ?? undefined,
+        clipChallenge: clipChallenge ?? undefined,
+      });
+    }
+
+    // Build messages for Groq — inject correction note if needed
+    const chatMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+
+    if (worstWord && !clipChallenge) {
+      const errorInfo = INDIAN_EN_ERRORS[worstWord.word.toLowerCase()];
+      const pronunciationNote = errorInfo
+        ? `[COACH NOTE: The learner mispronounced "${worstWord.word}" — they likely said "${errorInfo.youSay}" instead of "${errorInfo.shouldSay}". Drop a one-clause correction naturally mid-sentence, then immediately continue the conversation. Do NOT ask them to repeat it. Do NOT pause the conversation.]`
+        : `[COACH NOTE: The learner mispronounced "${worstWord.word}" (score: ${worstWord.accuracyScore}%). Drop a one-clause correction naturally, then immediately continue. Do NOT ask them to repeat it.]`;
+
+      if (chatMessages.length > 0) {
+        const last = chatMessages[chatMessages.length - 1];
+        chatMessages[chatMessages.length - 1] = {
+          ...last,
+          content: last.content + " " + pronunciationNote,
+        };
+      }
+    }
+
+    // If showing a clip, override the AI response with the intro
+    if (clipChallenge) {
+      return NextResponse.json({
+        type: "clip_challenge",
+        content: clipIntro,
+        problemWords,
+        worstWord: worstWord ?? undefined,
+        clipChallenge,
+      });
+    }
+
+    const content = await groqChat(chatMessages, SCENARIO_PROMPTS[scenario]);
+
+    return NextResponse.json({
+      type: "continue",
+      content,
+      problemWords,
+      worstWord: worstWord ?? undefined,
+      retryWordResult: isRetry ? { word: retryWord, passed: problemWords.length === 0 } : undefined,
+    });
+  } catch (err) {
+    console.error("Chat error:", err);
+    return NextResponse.json({ error: "Chat failed" }, { status: 500 });
+  }
 }
